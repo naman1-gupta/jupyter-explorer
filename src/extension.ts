@@ -3,12 +3,15 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import axios from "axios";
+const fs = require('fs');
 
 import { TextDecoder, TextEncoder } from 'util';
 
 const base_url =
   "https://hub.ml.playment.io/user/naman.gupta@telusinternational.com/api/contents";
 const token = "";
+const base_dir = '/tmp/jupyter-explorer';
+
 export function activate(context: vscode.ExtensionContext) {
   console.log(
     'Congratulations, your extension "jupyter-explorer" is now active!'
@@ -32,8 +35,32 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('jupyter.openJupyterFile', (label: string, filePath: string) => {
       openJupyterFile(label, filePath);
-    }));
-  context.subscriptions.push(vscode.workspace.registerNotebookSerializer('notebook', new JupyterNotebookProvider()));
+    })
+  );
+
+  vscode.workspace.onDidSaveTextDocument(async (document) => {
+    const filePath = document.fileName.replace(base_dir, '');
+    const content = document.getText();
+    try {
+      await saveJupyterFile(filePath, content);
+      vscode.window.showInformationMessage(`File saved: ${filePath}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to save file: ${error}`);
+    }
+  });
+
+
+  vscode.workspace.onDidSaveNotebookDocument(async (document) => {
+    console.log(document);
+    // const filePath = document.fileName.replace(base_dir, '');
+    // const content = document.getText();
+    // try {
+    //   await saveJupyterFile(filePath, content);
+    //   vscode.window.showInformationMessage(`File saved: ${filePath}`);
+    // } catch (error) {
+    //   vscode.window.showErrorMessage(`Failed to save file: ${error}`);
+    // }
+  });
 }
 
 export class JupyterTreeViewProvider
@@ -66,7 +93,6 @@ export class JupyterTreeViewProvider
         })
         .then((response) => {
           const items: JupyterItem[] = [];
-          console.log("Contents: ", response.data)
           response.data.content.forEach((element: any) => {
             var item = new JupyterItem(
               element.name,
@@ -78,7 +104,6 @@ export class JupyterTreeViewProvider
               item
             );
 
-            // console.log('Item', item)
           });
 
           return items;
@@ -118,29 +143,42 @@ function getContents(filePath: string): Promise<any> {
     headers: {
       Authorization: `token ${token}`
     }
-  }).then(response => response.data).catch(err => console.log(`Error fetching contents of file ${filePath}: ${err}`));
+  })
+    .then(response => response.data)
+    .catch(err =>
+      console.log(`Error fetching contents of file ${filePath}: ${err}`)
+    );
 }
 
 
 async function openJupyterFile(label: string, filePath: string): Promise<void> {
   try {
     const ext = label.split('.').pop();
+    const localFilePath = `${base_dir}${filePath}`;
+    const exists = await fs.existsSync(localFilePath);
+    let uri = vscode.Uri.parse(`untitled:${localFilePath}`);
 
+    if (exists) {
+      uri = vscode.Uri.parse(`file://${localFilePath}`);
+    }
+    let contents = await getContents(filePath);
+    let { content, type, mimetype, last_modified }: any = contents;
 
-    const uri = vscode.Uri.parse(`untitled:${label}`);
-
-
-    if (ext === 'ipynb') {
-      let contents = await getContents(filePath);
-      let { content }: any = contents;
+    if (type === 'notebook') {
       let cells = generateNotebookData(content);
-      const document = await vscode.workspace.openNotebookDocument('jupyter-notebook', cells);
+      const document = await vscode.workspace.openNotebookDocument(uri);
       const editor = await vscode.window.showNotebookDocument(document, {
         preview: false,
         preserveFocus: false
       });
 
+      const edit = new vscode.WorkspaceEdit();
+      const replaceCells = vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(0, document.cellCount), cells.cells);
+      edit.set(document.uri, [replaceCells]);
+      console.log('URI:', document.uri);
+      await vscode.workspace.applyEdit(edit);
 
+      // await document.save();
     } else {
       const document = await vscode.workspace.openTextDocument(uri);
       const editor = await vscode.window.showTextDocument(document, {
@@ -148,12 +186,9 @@ async function openJupyterFile(label: string, filePath: string): Promise<void> {
         preserveFocus: false
       });
 
-      let contents = await getContents(filePath);
-      let { content }: any = contents;
-
-
       const edit = new vscode.WorkspaceEdit();
       edit.replace(uri, new vscode.Range(0, 0, document.lineCount, 0), content);
+      console.log('URI:', document.uri);
       await vscode.workspace.applyEdit(edit);
     }
   } catch (error) {
@@ -177,8 +212,28 @@ function generateNotebookData(content: NotebookContent) {
   return new vscode.NotebookData(cells);
 }
 
+async function saveJupyterFile(filePath: string, content: string): Promise<void> {
+  console.log(`Saving at ${base_url}${filePath}`);
+  const response = await axios.put(`${base_url}${filePath}`,
+    JSON.stringify({ 'content': content, 'format': 'text', 'type': 'file' }), {
+    headers: {
+      Authorization: `token ${token}`
+    }
+  });
 
-export function deactivate() { }
+  if (response.status !== 200) {
+    console.log(response);
+    throw new Error(`HTTP error! status: ${response.status}`);
+  } else {
+    console.log('File saved!', response.data);
+  }
+}
+
+
+export async function deactivate() {
+  console.log('Deactivating...');
+  console.log(await fs.rm(base_dir, { recursive: true, force: true }));
+}
 
 
 interface NotebookContent {
@@ -189,59 +244,3 @@ interface NotebookCell {
   cell_type: string,
   source: string,
 }
-
-
-// interface RawNotebook {
-//   cells: RawNotebookCell[];
-// }
-
-// interface RawNotebookCell {
-//   source: string[];
-//   cell_type: 'code' | 'markdown';
-// }
-
-
-// export class JupyterNotebookProvider implements vscode.NotebookSerializer {
-//   async deserializeNotebook(
-//     content: Uint8Array,
-//     _token: vscode.CancellationToken
-//   ): Promise<vscode.NotebookData> {
-//     var contents = new TextDecoder().decode(content);
-
-//     let raw: RawNotebookCell[];
-//     try {
-//       raw = (<RawNotebook>JSON.parse(contents)).cells;
-//     } catch {
-//       raw = [];
-//     }
-
-//     const cells = raw.map(
-//       item =>
-//         new vscode.NotebookCellData(
-//           item.cell_type === 'code'
-//             ? vscode.NotebookCellKind.Code
-//             : vscode.NotebookCellKind.Markup,
-//           item.source.join('\n'),
-//           item.cell_type === 'code' ? 'python' : 'markdown'
-//         )
-//     );
-
-//     return new vscode.NotebookData(cells);
-//   }
-
-//   async serializeNotebook(
-//     data: vscode.NotebookData,
-//     _token: vscode.CancellationToken
-//   ): Promise<Uint8Array> {
-//     let contents: RawNotebookCell[] = [];
-
-//     for (const cell of data.cells) {
-//       contents.push({
-//         cell_type: cell.kind === vscode.NotebookCellKind.Code ? 'code' : 'markdown',
-//         source: cell.value.split(/\r?\n/g)
-//       });
-//     }
-
-//     return new TextEncoder().encode(JSON.stringify(contents));
-//   }
-// }
